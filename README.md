@@ -1,11 +1,10 @@
-## My Project
+## Use AWS Systems Manager custom Inventory to locate Log4j files on managed instances
 
-TODO: Fill this README out!
+This repo hosts resources related to the AWS Cloud Operations blog post:
 
-Be sure to:
+[Use AWS Systems Manager custom Inventory to locate Log4j files on managed instances]()
 
-* Change the title in this README
-* Edit your repository description on GitHub
+For details on how to provision the resources, refer to the blog post.
 
 ## Security
 
