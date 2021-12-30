@@ -1,0 +1,161 @@
+#*
+#* Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#* SPDX-License-Identifier: MIT-0
+#*
+#* Permission is hereby granted, free of charge, to any person obtaining a copy of this
+#* software and associated documentation files (the "Software"), to deal in the Software
+#* without restriction, including without limitation the rights to use, copy, modify,
+#* merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+#* permit persons to whom the Software is furnished to do so.
+#*
+#* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+#* INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+#* PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+#* HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+#* OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+#* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+#*
+
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS CloudFormation template to create an AWS Systems Manager document and State Manager association to gather custom inventory metadata on Systems Manager managed nodes.
+Parameters:
+  tagKey:
+    Type: String
+    Description: The tag key for the managed instances to be targeted by the State Manager association and for custom inventory metadata to be gathered.
+    Default: ''
+  tagValue:
+    Type: String
+    Description: The tag value for the managed instances to be targeted by the State Manager association and for custom inventory metadata to be gathered.
+    Default: ''
+Resources:
+  customInventoryLog4jDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Run PowerShell and Shell scripts before gathering Inventory metadata
+        mainSteps:
+          - action: aws:runPowerShellScript
+            name: runPowerShellScript
+            precondition:
+              StringEquals:
+                - platformType
+                - Windows
+            inputs:
+              runCommand: '{{ powerShellCommands }}'
+          - action: aws:runShellScript
+            name: runShellScript
+            precondition:
+              StringEquals:
+                - platformType
+                - Linux
+            inputs:
+              runCommand: '{{ shellCommands }}'
+          - action: aws:softwareInventory
+            name: collectSoftwareInventoryItems
+            inputs:
+              applications: '{{ applications }}'
+              awsComponents: '{{ awsComponents }}'
+              networkConfig: '{{ networkConfig }}'
+              customInventory: '{{ customInventory }}'
+        parameters:
+          powerShellCommands:
+            type: StringList
+            description: (Required) Specify a PowerShell script or a command to run.
+            minItems: 1
+            displayType: textarea
+          shellCommands:
+            type: StringList
+            description: (Required) Specify a shell script or a command to run.
+            minItems: 1
+            displayType: textarea
+          applications:
+            type: String
+            default: Enabled
+            description: (Optional) Collect data for installed applications.
+            allowedValues:
+              - Enabled
+              - Disabled
+          awsComponents:
+            type: String
+            default: Enabled
+            description: (Optional) Collect data for AWSComponents like amazon-ssm-agent.
+            allowedValues:
+              - Enabled
+              - Disabled
+          networkConfig:
+            type: String
+            default: Enabled
+            description: (Optional) Collect data for Network configurations.
+            allowedValues:
+              - Enabled
+              - Disabled
+          customInventory:
+            type: String
+            default: Enabled
+            description: (Optional) Collect data for custom inventory.
+            allowedValues:
+              - Enabled
+              - Disabled
+  InventoryAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      AssociationName: customInventoryLog4j
+      Name: !Ref 'customInventoryLog4jDocument'
+      ScheduleExpression: rate(1 day)
+      Targets:
+        - Key: !Sub 'tag:${tagKey}'
+          Values:
+            - !Ref 'tagValue'
+      Parameters:
+        applications:
+          - Enabled
+        awsComponents:
+          - Enabled
+        networkConfig:
+          - Enabled
+        customInventory:
+          - Enabled
+        powerShellCommands:
+          - $drives = Get-PSDrive -PSProvider 'FileSystem'
+          - $items = @()
+          - Foreach ($drive in $drives)
+          - '{'
+          - '    $items = Get-ChildItem -Path $drive.Root -Recurse -File -Force -Include *.jar -ErrorAction 0 | Select-String "JndiLookup.class" -List'
+          - '}'
+          - if ($items) {
+          - '    $data = $items | Select-Object Filename, Path'
+          - '    $data = $data | ConvertTo-Json'
+          - '    $content = "{`"SchemaVersion`" : `"1.0`", `"TypeName`": `"Custom:Log4J`", `"Content`": $data}"'
+          - '    $instanceId = Invoke-RestMethod -uri http://169.254.169.254/latest/meta-data/instance-id'
+          - '    if ($instanceId -ne $null)'
+          - '    {'
+          - '        $filepath = "C:\ProgramData\Amazon\SSM\InstanceData\" + $instanceId + "\inventory\custom\CustomLog4J.json"'
+          - '    }'
+          - '    else '
+          - '    {'
+          - '        $hybridInstanceId = (Get-Content -Path "C:\ProgramData\Amazon\SSM\InstanceData\registration" | ConvertFrom-Json).ManagedInstanceId'
+          - '        $filepath = "C:\ProgramData\Amazon\SSM\InstanceData\" + $hybridInstanceId + "\inventory\custom\CustomLog4J.json"'
+          - '    }'
+          - '    if (-NOT (Test-Path $filepath)) {'
+          - '        New-Item $filepath -ItemType file'
+          - '    }'
+          - '    Set-Content -Path $filepath -Value $content'
+          - '}'
+        shellCommands:
+          - if [ "$(curl -sL -w '%{http_code}' 169.254.169.254/latest/meta-data/instance-id -o /dev/null)" = "200" ]; then
+          - '    instanceId=$(curl 169.254.169.254/latest/meta-data/instance-id)'
+          - '    inventoryPath=(/var/lib/amazon/ssm/$instanceId/inventory/custom)'
+          - else
+          - '    hybridDirectory=$(find /var/lib/amazon/ssm -name "mi-*")'
+          - '    inventoryPath=($hybridDirectory/inventory/custom)'
+          - fi
+          - printf '{"SchemaVersion":"1.0","TypeName":"Custom:Log4J","Content":[' > $inventoryPath/CustomLog4J.json
+          - for jarPath in $(grep -r --include *.[wj]ar "JndiLookup.class" / 2>&1 | grep matches | sed -e 's/Binary file //' -e 's/ matches//'); do
+          - '  printf ''%s'' $SPLITTER >> $inventoryPath/CustomLog4J.json'
+          - '  SPLITTER=","'
+          - '  printf ''{"Filename":"%s","Path":"%s"}'' $(basename $jarPath) $jarPath >> $inventoryPath/CustomLog4J.json  '
+          - done
+          - printf ']}\n' >> $inventoryPath/CustomLog4J.json
